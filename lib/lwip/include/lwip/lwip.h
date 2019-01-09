@@ -56,6 +56,11 @@ typedef struct _dw1000_lwip_config_t{
    uint32_t uwbtime_to_systime; //!< UWB time to system time
 }dw1000_lwip_config_t;
 
+//! Range control parameters.
+typedef struct _dw1000_lwip_control_t{
+    uint16_t delay_start_enabled:1;  //!< Set for enabling delayed start
+}dw1000_lwip_control_t;
+
 //! Lwip modes. 
 typedef enum _dw1000_lwip_modes_t{
     LWIP_BLOCKING,              //!< lwip blocking mode
@@ -87,6 +92,8 @@ typedef struct _dw1000_lwip_instance_t{
 
     dw1000_lwip_config_t * config;         //!< lwip config parameters 
     dw1000_lwip_status_t status;           //!< lwip status
+    dw1000_lwip_control_t control;         //!< Structure of lwip control
+    uint64_t delay;                        //!< Delay in transmission
     uint16_t nframes;                      //!< Number of buffers defined to store the lwip data  
     uint16_t buf_idx;                      //!< Indicates number of buffer instances for the chosen bsp 
     uint16_t buf_len;                      //!< Indicates buffer length 
@@ -193,6 +200,19 @@ dw1000_netif_init( struct netif * dw1000_netif);
  */
 void 
 dw1000_lwip_send(dw1000_dev_instance_t * inst, uint16_t payload_size, char * payload, ip_addr_t * ipaddr);
+
+/**
+ * [dw1000_lwip_send_delay_start function to pass the payload to lwIP stack after specified delay]
+ * @param inst         [Device/Parent instance]
+ * @param payload_size [Size of the payload to be sent]
+ * @param payload      [Pointer to the payload]
+ * @param ipaddr       [Pointer to the IP address of target device]
+ * @param delay        [Time until which request has to be resumed]
+ * 
+ * @return dw1000_dev_status_t
+ */
+dw1000_dev_status_t
+dw1000_lwip_send_delay_start(dw1000_dev_instance_t * inst, uint16_t payload_size, char * payload, ip_addr_t * ipaddr, uint64_t delay);
 
 /**
  * [dw1000_ll_output Low Level output function, acts as a brigde between 6lowPAN and radio]

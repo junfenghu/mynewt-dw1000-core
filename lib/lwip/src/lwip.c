@@ -63,6 +63,7 @@ static bool tx_complete_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t 
 static bool rx_timeout_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cbs);
 static bool rx_error_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cbs);
 dw1000_lwip_context_t cntxt;
+
 /**
  * API to assign the config parameters.
  *
@@ -233,8 +234,9 @@ dw1000_lwip_write(dw1000_dev_instance_t * inst, struct pbuf *p, dw1000_lwip_mode
 	id_pbuf = (char *)malloc((inst->lwip->buf_len) + 4+2);
 	assert(id_pbuf);
 	/* Append the 'L' 'W' 'I' 'P' Identifier */
-	*(id_pbuf + 0) = 'L';	*(id_pbuf + 1) = 'W';
-	*(id_pbuf + 2) = 'I';	*(id_pbuf + 3) = 'P';
+	//*(id_pbuf + 0) = 'L';	*(id_pbuf + 1) = 'W';
+	//*(id_pbuf + 2) = 'I';	*(id_pbuf + 3) = 'P';
+	memcpy(id_pbuf, "LWIP", 4);
 
 	/* Append the destination Short Address */
 	*(id_pbuf + 4) = (char)((inst->lwip->dst_addr >> 0) & 0xFF);
@@ -250,7 +252,15 @@ dw1000_lwip_write(dw1000_dev_instance_t * inst, struct pbuf *p, dw1000_lwip_mode
     
 	dw1000_write_tx_fctrl(inst, inst->lwip->buf_len, 0, false);
 	inst->lwip->lwip_netif.flags = NETIF_FLAG_UP | NETIF_FLAG_LINK_UP ;
+
+    if(inst->lwip->control.delay_start_enabled)
+		dw1000_set_delay_start(inst, inst->lwip->delay);
+
 	inst->lwip->status.start_tx_error = dw1000_start_tx(inst).start_tx_error;
+
+	if(inst->lwip->status.start_tx_error)
+		os_sem_release(&inst->lwip->sem);
+
 
 	if( mode == LWIP_BLOCKING )
 		err = os_sem_pend(&inst->lwip->sem, OS_TIMEOUT_NEVER); // Wait for completion of transactions units os_clicks
@@ -286,8 +296,10 @@ dw1000_lwip_start_rx(dw1000_dev_instance_t * inst, uint16_t timeout){
 static bool 
 rx_complete_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cbs){
 
-	if(strncmp((char *)&inst->fctrl, "LW",2))
+	if(strncmp((char *)&inst->fctrl, "LW",2)){
+        dw1000_start_rx(inst);
         return false;
+    }
 
     os_error_t err = os_sem_release(&inst->lwip->data_sem);
     assert(err == OS_OK);
@@ -312,7 +324,7 @@ rx_complete_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cbs){
         inst->lwip->lwip_netif.input((struct pbuf *)data_buf, &inst->lwip->lwip_netif);
 	}
     else
-		dw1000_lwip_start_rx(inst,0x0000);
+		dw1000_lwip_start_rx(inst, inst->lwip->config->resp_timeout);
 
 	return true;
 }
@@ -457,8 +469,31 @@ dw1000_lwip_send(dw1000_dev_instance_t * inst, uint16_t payload_size, char * pay
 
 	memset(payload_lwip, 0, payload_size);
 	memcpy(payload_lwip, payload, payload_size);
-    raw_sendto(inst->lwip->pcb, pb, ipaddr);
+	raw_sendto(inst->lwip->pcb, pb, ipaddr);
     pbuf_free(pb);
+}
+
+/**
+ * [dw1000_lwip_send_delay_start function to pass the payload to lwIP stack after specified delay.]
+ * @param inst         [Device/Parent instance]
+ * @param payload_size [Size of the payload to be sent]
+ * @param payload      [Pointer to the payload]
+ * @param ipaddr       [Pointer to the IP address of target device]
+ * @param delay        [Time until which request has to be resumed]
+ * 
+ * @return dw1000_dev_status_t
+ */
+dw1000_dev_status_t 
+dw1000_lwip_send_delay_start(dw1000_dev_instance_t * inst, uint16_t payload_size, char * payload, ip_addr_t * ipaddr, uint64_t delay){
+
+    dw1000_lwip_instance_t *lwip = inst->lwip;    
+  
+    lwip->control.delay_start_enabled = 1;
+    lwip->delay = delay;
+    dw1000_lwip_send(inst, payload_size, payload, ipaddr);
+    lwip->control.delay_start_enabled = 0;
+    
+   return inst->status;
 }
 
 /**
@@ -475,15 +510,7 @@ dw1000_ll_output(struct netif *dw1000_netif, struct pbuf *p){
 
 	dw1000_lwip_write(inst, p, LWIP_BLOCKING);
 
-	err_t error = ERR_OK;
-
-	if (inst->lwip->status.request_timeout)
-		error = ERR_INPROGRESS;
-
-	if (inst->lwip->status.rx_timeout_error)
-		error = ERR_TIMEOUT;
-
-	return error;
+	return ERR_OK;
 }
 
 /**
@@ -515,21 +542,11 @@ void
 print_error(err_t error){
 
 	switch(error){
-		case ERR_MEM :
-			printf("[Memory Error]\n");
-			break;
-		case ERR_BUF :
-			printf("[Buffer Error]\n");
-			break;
-		case ERR_TIMEOUT :
-			printf("[Timeout Error]\n");
-			break;
-		case ERR_RTE :
-			printf("[Routing Error]\n");
-			break;
-		case ERR_INPROGRESS :
-			printf("[Inprogress Error]\n");
-			break;
+		case ERR_MEM :			printf("[Memory Error]\n");		break;
+		case ERR_BUF :			printf("[Buffer Error]\n");		break;
+		case ERR_TIMEOUT :		printf("[Timeout Error]\n");	break;
+		case ERR_RTE :			printf("[Routing Error]\n");	break;
+		case ERR_INPROGRESS :	printf("[Inprogress Error]\n");	break;
 		case ERR_OK :
 		default :
 			break;
