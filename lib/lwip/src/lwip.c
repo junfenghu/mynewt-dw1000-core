@@ -190,10 +190,8 @@ lwip_rx_cb(void *arg, struct raw_pcb *pcb, struct pbuf *p, const ip_addr_t *addr
     if (pbuf_header( p, -PBUF_IP_HLEN)==0){
     	inst->lwip->payload_ptr = p->payload;
 
-#if 0
-		if(inst->lwip_rx_complete_cb != NULL)
-	    	inst->lwip_rx_complete_cb(inst);
-#endif
+    	 if(inst->lwip->cbs.complete_cb != NULL)
+	    	inst->lwip->cbs.complete_cb(inst, &inst->lwip->cbs);
     }
     memp_free(MEMP_PBUF_POOL,p);
     return 1;
