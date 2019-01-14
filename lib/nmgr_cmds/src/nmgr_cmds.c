@@ -86,6 +86,7 @@
                                  + sizeof("\"off\"") + sizeof(uint32_t) + sizeof(uint32_t)) //Length of "len" + "off" + "data"
 #define RETRY_COUNT 5
 #define INITIAL_OS_MBUF_SIZE 256
+#define NMGR_CMD_STACK_SIZE 1024
 
 //#define DIAGMSG(s,u) printf(s,u)
 #ifndef DIAGMSG
@@ -122,6 +123,7 @@ static dw1000_mac_interface_t g_cbs[] = {
         }
 #endif
 };
+
 struct shell_cmd_help help[] = {
     {
         .summary = "Command to upload an image to a slave node",
@@ -155,6 +157,7 @@ struct shell_cmd imgmgr_cli_cmds[] = {
     },
 };
 
+#define CLI_CMD_NUM sizeof(imgmgr_cli_cmds)/sizeof(struct shell_cmd)
 
 /**
  * API to initialise the rng package.
@@ -178,6 +181,8 @@ typedef struct _nmgr_cmd_instance_t {
     uint16_t cmd_id;
     uint32_t curr_off;
     uint8_t err_status;
+    uint8_t frame_seq_num;
+    uint8_t nmgr_cmd_seq_num;
     struct os_mbuf *rx_pkt;
     os_stack_t *pstack;
     dw1000_dev_instance_t* parent;
@@ -209,22 +214,21 @@ void nmgr_cmds_pkg_init(void){
     dw1000_mac_append_interface(hal_dw1000_inst(2), &g_cbs[2]);
     nmgr_inst->parent = hal_dw1000_inst(2);
 #endif
-    shell_cmd_register(&imgmgr_cli_cmds[0]);
-    shell_cmd_register(&imgmgr_cli_cmds[1]);
-    shell_cmd_register(&imgmgr_cli_cmds[2]);
+    for(int i =0; i < CLI_CMD_NUM; i++)
+        shell_cmd_register(&imgmgr_cli_cmds[i]);
 
     os_sem_init(&nmgr_inst->cmd_sem, 0x1);
 
     os_eventq_init(&nmgr_inst->nmgr_eventq);
     
-    nmgr_inst->pstack = malloc(sizeof(os_stack_t)*OS_STACK_ALIGN(1024));
+    nmgr_inst->pstack = malloc(sizeof(os_stack_t)*OS_STACK_ALIGN(NMGR_CMD_STACK_SIZE));
     os_task_init(&nmgr_inst->nmgr_task, "nmgr_cmd_task",
             nmgr_cmd_task,
             NULL,
             8,
             OS_WAIT_FOREVER,
             nmgr_inst->pstack,
-            OS_STACK_ALIGN(1024));
+            OS_STACK_ALIGN(NMGR_CMD_STACK_SIZE));
     os_callout_init(&nmgr_inst->rx_callout, &nmgr_inst->nmgr_eventq, rx_post_process, (void*)hal_dw1000_inst(0));
 
 }
@@ -280,32 +284,41 @@ nmgr_uwb_img_upload(int argc, char** argv){
             rsp = buf_to_imgmgr_mbuf(buf, len, off, s_fa->fa_size);
             if (rsp == NULL) {
                 printf("Could not convert flash data to mbuf\n");
-                return 1;
+                return 0;
             }
             off += len;
         } else {
             rsp = NULL;
         }
         uint16_t timeout = dw1000_phy_frame_duration(&inst->attrib, 126) + 0x5000;
-        if(nmgr_cmd_send(inst, strtol(argv[2], NULL, 16), OS_MBUF_DATA(rsp, uint8_t*), OS_MBUF_PKTLEN(rsp), timeout) != 0){
+        uint8_t mbuf[OS_MBUF_PKTLEN(rsp)];
+        os_mbuf_copydata(rsp, 0, OS_MBUF_PKTLEN(rsp), mbuf);
+        if(nmgr_cmd_send(inst, strtol(argv[2], NULL, 16), mbuf, OS_MBUF_PKTLEN(rsp), timeout) != 0){
             printf("Tx Error \n");
             os_sem_release(&nmgr_inst->cmd_sem);
-            rsp->om_len = 0;
+            nmgr_inst->curr_off = 0;
             return 0;
         }
         os_mbuf_free_chain(rsp); 
         err = os_sem_pend(&nmgr_inst->cmd_sem, OS_TIMEOUT_NEVER);
         err |= os_sem_release(&nmgr_inst->cmd_sem);
         assert(err == OS_OK);
-        
-        if(inst->status.rx_timeout_error){
-            retries++;
-            inst->status.rx_timeout_error = 0;
-            if(retries > RETRY_COUNT)
+        if(nmgr_inst->err_status != 0){
+            if(inst->status.rx_timeout_error){
+                retries++;
+                inst->status.rx_timeout_error = 0;
+                if(retries > RETRY_COUNT){
+                    nmgr_inst->curr_off = 0;
+                    goto err;
+                }else
+                    off -= len;
+            }else{
+                printf("Err %d occured \n", nmgr_inst->err_status);
+                printf("Refer to mgmt.h for more info \n");
+                nmgr_inst->curr_off = 0;
                 goto err;
-            else
-                off -= len;
-        }else if(nmgr_inst->err_status == 0){
+            }
+        }else{ 
             retries = 0;
             //If the offset was wrong then update the offset with the received offset
             off = nmgr_inst->curr_off;
@@ -329,7 +342,7 @@ nmgr_uwb_img_list(int argc, char** argv){
     hdr.nh_flags = 0;
     hdr.nh_op = NMGR_OP_READ;
     hdr.nh_group = htons(MGMT_GROUP_ID_IMAGE);
-    hdr.nh_seq = 0;
+    hdr.nh_seq = nmgr_inst->nmgr_cmd_seq_num++;
     hdr.nh_id = IMGMGR_NMGR_ID_STATE;
 
     uint16_t timeout = dw1000_phy_frame_duration(&inst->attrib, 126) + 0x600;
@@ -353,14 +366,14 @@ nmgr_uwb_img_set_state(int argc, char** argv){
     uint16_t dst_add = 0x0000;
 
     int rc = 0;
-    struct os_mbuf* tx_pkt = os_msys_get_pkthdr(NMGR_UWB_MTU, 0);
+    struct os_mbuf* tx_pkt = os_msys_get_pkthdr(NMGR_UWB_MTU - sizeof(struct nmgr_hdr), 0);
     struct nmgr_hdr *hdr = os_mbuf_extend(tx_pkt, sizeof(struct nmgr_hdr));
     
     hdr->nh_len = 0;
     hdr->nh_flags = 0;
     hdr->nh_op = NMGR_OP_WRITE;
     hdr->nh_group = htons(MGMT_GROUP_ID_IMAGE);
-    hdr->nh_seq = 0;
+    hdr->nh_seq = nmgr_inst->nmgr_cmd_seq_num++;
     hdr->nh_id = IMGMGR_NMGR_ID_STATE;
 
     cbor_mbuf_writer_init(&nmgr_inst->writer, tx_pkt);
@@ -396,7 +409,9 @@ nmgr_uwb_img_set_state(int argc, char** argv){
     hdr->nh_len = htons(hdr->nh_len);
     
     uint16_t timeout = dw1000_phy_frame_duration(&inst->attrib, 126) + 0x1000;
-    nmgr_cmd_send(inst, dst_add, OS_MBUF_DATA(tx_pkt, uint8_t*), OS_MBUF_PKTLEN(tx_pkt), timeout);
+    uint8_t mbuf[OS_MBUF_PKTLEN(tx_pkt)];
+    os_mbuf_copydata(tx_pkt, 0, OS_MBUF_PKTLEN(tx_pkt), mbuf);
+    nmgr_cmd_send(inst, dst_add, mbuf, OS_MBUF_PKTLEN(tx_pkt), timeout);
 
     os_mbuf_free_chain(tx_pkt);
     return 0;
@@ -407,8 +422,7 @@ buf_to_imgmgr_mbuf(uint8_t *buf, uint64_t len, uint64_t off, uint32_t size)
 {
     int rc;
     struct os_mbuf *tx_pkt = os_msys_get_pkthdr(len, 0);
-    if (!tx_pkt)
-    {
+    if (!tx_pkt){
         printf("could not get mbuf\n");
         return 0;
     }
@@ -418,7 +432,7 @@ buf_to_imgmgr_mbuf(uint8_t *buf, uint64_t len, uint64_t off, uint32_t size)
     hdr->nh_flags = 0;
     hdr->nh_op = NMGR_OP_WRITE;
     hdr->nh_group = htons(MGMT_GROUP_ID_IMAGE);
-    hdr->nh_seq = 0;
+    hdr->nh_seq = nmgr_inst->nmgr_cmd_seq_num++;
     hdr->nh_id = IMGMGR_NMGR_ID_UPLOAD;
 
     cbor_mbuf_writer_init(&nmgr_inst->writer, tx_pkt);
@@ -460,7 +474,7 @@ nmgr_cmd_send(dw1000_dev_instance_t * inst, uint16_t dst_add, uint8_t* buf, uint
     frame->src_address = inst->my_short_address;
     frame->code = NMGR_CMD_STATE_SEND;
     frame->dst_address = dst_add;
-    frame->seq_num = 100;
+    frame->seq_num = nmgr_inst->frame_seq_num++;
     frame->PANID = 0xDECA;
     strncpy((char*)&frame->fctrl, "NM", 2);
 
@@ -489,6 +503,9 @@ nmgr_cmd_send(dw1000_dev_instance_t * inst, uint16_t dst_add, uint8_t* buf, uint
  */
 static bool 
 rx_timeout_cb(dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cbs){
+    if (strncmp((char*)&inst->fctrl, "NM", 2)){
+        return false;
+    }
     nmgr_inst->err_status = 1;
     nmgr_inst->repeat_mode = 0;
     if(os_sem_get_count(&nmgr_inst->cmd_sem) == 0)
@@ -525,9 +542,17 @@ rx_post_process(struct os_event* ev){
     dw1000_nmgr_uwb_instance_t *nmgr = inst->nmgruwb;
     nmgr_uwb_frame_t *frame = nmgr->frame;
     
-    //The packet will have the fcntl. So trim it before sending to nmgr
+    //There is a chance that the response could be split if the total length is more than NMGR_UWB_MTU
+    //If so then do the decoding only after the entire packet is received
     if(nmgr_inst->repeat_mode == 0){
         nmgr_inst->rx_pkt = os_msys_get_pkthdr(htons(frame->hdr.nh_len), 0);
+        if(nmgr_inst->rx_pkt == NULL){
+            nmgr_inst->err_status = -1;
+            if(os_sem_get_count(&nmgr_inst->cmd_sem) == 0)
+                os_sem_release(&nmgr_inst->cmd_sem);
+            return;
+        }
+        //Trim out the uwb frame header
         os_mbuf_copyinto(nmgr_inst->rx_pkt, 0, &frame->array[sizeof(struct _ieee_std_frame_t)], inst->frame_len - sizeof(struct _ieee_std_frame_t));
 
         if(htons(frame->hdr.nh_len) > NMGR_UWB_MTU){
@@ -551,9 +576,12 @@ rx_post_process(struct os_event* ev){
         uint16_t cur_len = OS_MBUF_PKTLEN(nmgr_inst->rx_pkt);
         os_mbuf_copyinto(nmgr_inst->rx_pkt, cur_len, &frame->array[sizeof(struct _ieee_std_frame_t)], inst->frame_len - sizeof(struct _ieee_std_frame_t));
     }
+    //Start decoding
     if(nmgr_inst->repeat_mode == 0){
+
         cbor_mbuf_reader_init(&nmgr_inst->reader, nmgr_inst->rx_pkt, sizeof(struct nmgr_hdr));
         cbor_parser_init(&nmgr_inst->reader.r, 0, &nmgr_inst->n_b.parser, &nmgr_inst->n_b.it);
+
         if(nmgr_inst->cmd_id == IMGMGR_NMGR_ID_UPLOAD){
             long long int rc = 0, off = 0;
             char rsn[15] = "\0";
@@ -584,15 +612,15 @@ rx_post_process(struct os_event* ev){
             };
             cbor_read_object(&nmgr_inst->n_b.it, attrs);
             if(rc != 0){
-                printf("rsn = %s \n", rsn);
-                nmgr_inst->err_status = 1;
+                nmgr_inst->err_status = (uint8_t)rc;
+                
             }else{
                 nmgr_inst->err_status = 0;
                 nmgr_inst->curr_off = off;
             }
             os_mbuf_free_chain(nmgr_inst->rx_pkt);
             os_sem_release(&nmgr_inst->cmd_sem);
-        }else{
+        }else if(nmgr_inst->cmd_id == IMGMGR_NMGR_ID_STATE){
             struct h_obj {
                 char hash[IMGMGR_HASH_LEN];
                 char version[32];
@@ -679,7 +707,6 @@ rx_post_process(struct os_event* ev){
                 },
             };
             int err = cbor_read_object(&nmgr_inst->n_b.it, arr);
-            printf("rc = %lld \n", rc);
             if(rc != 0LL || err != 0){
                 nmgr_inst->err_status = 1;
                 printf("Wrong hash sent \n");
@@ -703,6 +730,9 @@ rx_post_process(struct os_event* ev){
 err:
             os_mbuf_free_chain(nmgr_inst->rx_pkt);
             
+        }else{
+            printf("Unrecognized command \n");
+            os_mbuf_free_chain(nmgr_inst->rx_pkt);
         }
     }
 }

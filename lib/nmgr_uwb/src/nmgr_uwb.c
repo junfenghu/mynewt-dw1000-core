@@ -208,9 +208,9 @@ nmgr_resp_cb(struct nmgr_transport *nt, struct os_mbuf *m){
     //left overs from last transactions are going out
     memset(frame->array, 0x00, sizeof(frame->payload));
     //Copy the mbuf data to the frame to be sent
+    os_mbuf_copydata(m, 0, pktlen, &frame->array[sizeof(struct _ieee_std_frame_t)]);
+    memcpy(&frame->array[0], OS_MBUF_USRHDR(m), usrlen);
     if(repeat_mode == 0){
-        memcpy(&frame->array[sizeof(struct _ieee_std_frame_t)], OS_MBUF_DATA(m, void*), pktlen);
-        memcpy(&frame->array[0], OS_MBUF_USRHDR(m), usrlen);
         if(htons(frame->hdr.nh_len) > NMGR_UWB_MTU){
             repeat_mode = 1;
             rem_len = htons(frame->hdr.nh_len) - (pktlen - sizeof(struct nmgr_hdr));
@@ -219,8 +219,6 @@ nmgr_resp_cb(struct nmgr_transport *nt, struct os_mbuf *m){
             dw1000_set_rx_timeout(inst, 0);
         }
     }else{
-        memcpy(&frame->array[sizeof(struct _ieee_std_frame_t)], OS_MBUF_DATA(m, void*), pktlen);
-        memcpy(&frame->array[0], OS_MBUF_USRHDR(m), usrlen);
         rem_len = rem_len - pktlen;
         if(rem_len == 0){
             repeat_mode = 0;
@@ -239,7 +237,7 @@ nmgr_resp_cb(struct nmgr_transport *nt, struct os_mbuf *m){
     dw1000_write_tx_fctrl(inst, totlen, 0, true);
     if(dw1000_start_tx(inst).start_tx_error){
         os_sem_release(&sem);
-        printf("Err happened \n");
+        printf("Tx Error \n");
     }
     os_sem_pend(&sem, OS_TIMEOUT_NEVER);
     os_sem_release(&sem);
@@ -266,7 +264,7 @@ rx_complete_cb(struct _dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cb
     nmgr_uwb_frame_t *frame = nmgr->frame;
     //Read the buffer
     memset(frame, 0x00, sizeof(nmgr_uwb_frame_t));
-    dw1000_read_rx(inst, frame->array, 0, inst->frame_len);
+    memcpy(&frame->array[0], inst->rxbuf, sizeof(nmgr_uwb_frame_t));
 
     if(frame->dst_address == inst->my_short_address){
         if(frame->code == NMGR_CMD_STATE_RSP)
