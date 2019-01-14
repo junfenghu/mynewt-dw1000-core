@@ -1,4 +1,3 @@
-#
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -17,25 +16,33 @@
 # under the License.
 #
 
-pkg.name: lib/nranges
-pkg.description: TWR ranging using 2n+2 messages.
-pkg.author: "Paul Kettle <paul.kettle@decawave.com>"
-pkg.homepage: "http://www.decawave.com/"
-pkg.keywords:
-    - dw1000
-    - CCP
+# Package: lib/cir
 
-pkg.cflags:
-    - "-std=gnu99"
-    - "-fms-extensions"
-
-pkg.deps:
-    - "@mynewt-dw1000-core/hw/drivers/dw1000"
-    - "@mynewt-dw1000-core/lib/rng"
-
-pkg.lflags:
-    - "-lm"
-
-pkg.init:
-    dw1000_nrng_pkg_init: 411
+syscfg.defs:
+    CIR_ENABLED:
+        description: 'Channel Impulse Response utils'
+        value: 1
+        restrictions: CIR_ENABLED
+    CIR_SIZE:
+        description: 'Number of samples'
+        value: 8
+    CIR_OFFSET:
+        description: 'offsert in CIR readout'
+        value: 1
+    CIR_VERBOSE:
+        description: 'JSON print of CIR'
+        value: 0
+    PMEM_ENABLED:
+        description: 'Channel Impulse Response utils'
+        value: 0
+        restrictions: PMEM_ENABLED
+    PMEM_SIZE:
+        description: 'Number of samples'
+        value: 64
+    PMEM_OFFSET:
+        description: 'offsert in Preamble readout'
+        value: 0
+    PMEM_VERBOSE:
+        description: 'JSON print of PMEM'
+        value: 0
 

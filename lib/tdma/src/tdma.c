@@ -51,6 +51,15 @@
 #include <ccp/ccp.h>
 #endif
 
+#include <stats/stats.h>
+
+STATS_NAME_START(tdma_stat_section)
+    STATS_NAME(tdma_stat_section, slot_timer_cnt)
+    STATS_NAME(tdma_stat_section, superframe_cnt)
+    STATS_NAME(tdma_stat_section, rx_complete)
+    STATS_NAME(tdma_stat_section, tx_complete)
+STATS_NAME_END(tdma_stat_section)
+
 //#define DIAGMSG(s,u) printf(s,u)
 #ifndef DIAGMSG
 #define DIAGMSG(s,u)
@@ -85,7 +94,7 @@ tdma_init(struct _dw1000_dev_instance_t * inst, uint32_t period, uint16_t nslots
     if (inst->tdma == NULL) {
         tdma = (tdma_instance_t *) malloc(sizeof(struct _tdma_instance_t) + nslots * sizeof(struct _tdma_slot_t *)); 
         assert(tdma);
-        memset(tdma, 0, sizeof(tdma_instance_t) + nslots * sizeof(struct _tdma_slot_t * ));
+        memset(tdma, 0, sizeof(struct _tdma_instance_t) + nslots * sizeof(struct _tdma_slot_t * ));
         tdma->status.selfmalloc = 1;
         os_error_t err = os_mutex_init(&tdma->mutex);
         assert(err == OS_OK);
@@ -93,7 +102,7 @@ tdma_init(struct _dw1000_dev_instance_t * inst, uint32_t period, uint16_t nslots
         tdma->period = period; 
         tdma->parent = inst;
 #ifdef TDMA_TASKS_ENABLE
-        tdma->task_prio = inst->task_prio + 0x1;
+        tdma->task_prio = inst->task_prio + 0x4;
 #endif
         inst->tdma = tdma;
     }else{
@@ -106,6 +115,23 @@ tdma_init(struct _dw1000_dev_instance_t * inst, uint32_t period, uint16_t nslots
         .rx_complete_cb = rx_complete_cb
     };
     dw1000_mac_append_interface(inst, &inst->tdma->cbs);
+    
+    int rc = stats_init(
+                STATS_HDR(inst->tdma->stat),
+                STATS_SIZE_INIT_PARMS(inst->tdma->stat, STATS_SIZE_32),
+                STATS_NAME_INIT_PARMS(tdma_stat_section)
+            );
+    assert(rc == 0);
+
+#if  MYNEWT_VAL(DW1000_DEVICE_0) && !MYNEWT_VAL(DW1000_DEVICE_1)
+    rc = stats_register("tdma", STATS_HDR(inst->tdma->stat));
+#elif  MYNEWT_VAL(DW1000_DEVICE_0) && MYNEWT_VAL(DW1000_DEVICE_1)
+    if (inst->idx == 0)
+        rc |= stats_register("tdma0", STATS_HDR(inst->tdma->stat));
+    else
+        rc |= stats_register("tdma1", STATS_HDR(inst->tdma->stat));
+#endif
+    assert(rc == 0);
 
 #ifdef TDMA_TASKS_ENABLE
     os_callout_init(&tdma->event_cb, &tdma->eventq, tdma_superframe_event_cb, (void *) tdma);
@@ -149,11 +175,39 @@ void tdma_pkg_init(void){
 
     printf("{\"utime\": %lu,\"msg\": \"tdma_pkg_init\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
 
-    dw1000_dev_instance_t * inst = hal_dw1000_inst(0);
-    tdma_init(inst, MYNEWT_VAL(TDMA_PERIOD), MYNEWT_VAL(TDMA_NSLOTS)); 
+#if MYNEWT_VAL(DW1000_DEVICE_0) 
+        tdma_init(hal_dw1000_inst(0), MYNEWT_VAL(TDMA_PERIOD), MYNEWT_VAL(TDMA_NSLOTS)); 
+#endif
+#if MYNEWT_VAL(DW1000_DEVICE_1)
+        tdma_init(hal_dw1000_inst(1), MYNEWT_VAL(TDMA_PERIOD), MYNEWT_VAL(TDMA_NSLOTS)); 
+#endif
+#if MYNEWT_VAL(DW1000_DEVICE_2)
+        tdma_init(hal_dw1000_inst(2), MYNEWT_VAL(TDMA_PERIOD), MYNEWT_VAL(TDMA_NSLOTS));     
+#endif
+
 }
 
 #ifdef TDMA_TASKS_ENABLE
+
+
+/**
+ * API to feed the sanity watchdog
+ *
+ * @return void
+ */
+#if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0 
+static void
+sanity_feeding_cb(struct os_event * ev)
+{
+    assert(ev != NULL);
+    assert(ev->ev_arg != NULL);
+
+    tdma_instance_t * tdma = (void *)ev->ev_arg;
+    os_sanity_task_checkin(0);
+    os_callout_reset(&tdma->sanity_cb, OS_TICKS_PER_SEC);
+}
+#endif
+
 /**
  * API to initialise a higher priority task for the tdma slot tasks.
  *
@@ -173,13 +227,17 @@ static void tdma_tasks_init(struct _tdma_instance_t * inst)
                      (void *) inst,
                      inst->task_prio,
 #if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0
-                     OS_TICKS_PER_SEC*MYNEWT_VAL(TDMA_SANITY_INTERVAL),
+                     OS_TICKS_PER_SEC * MYNEWT_VAL(TDMA_SANITY_INTERVAL),
 #else
                      OS_WAIT_FOREVER,
 #endif
                      inst->task_stack,
                      DW1000_DEV_TASK_STACK_SZ);
     }       
+#if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0
+    os_callout_init(&inst->sanity_cb, &inst->eventq, sanity_feeding_cb, (void *) inst);
+    os_callout_reset(&inst->sanity_cb, OS_TICKS_PER_SEC);
+#endif
 }
 
 /**
@@ -194,9 +252,6 @@ static void tdma_task(void *arg)
 {
     tdma_instance_t * inst = arg;
     while (1) {
-#if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0
-        os_sanity_task_checkin(0);
-#endif
         os_eventq_run(&inst->eventq);
     }
 }
@@ -215,6 +270,7 @@ rx_complete_cb(struct _dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cb
     tdma_instance_t * tdma = inst->tdma;
    
     if (inst->ccp->status.valid && inst->fctrl_array[0] == FCNTL_IEEE_BLINK_CCP_64){
+        STATS_INC(inst->tdma->stat, rx_complete);
         DIAGMSG("{\"utime\": %lu,\"msg\": \"tdma:rx_complete_cb\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
         if (inst->tdma != NULL && inst->tdma->status.initialized){
             tdma->os_epoch = inst->ccp->os_epoch;//os_cputime_get32();
@@ -241,8 +297,9 @@ tx_complete_cb(struct _dw1000_dev_instance_t * inst, dw1000_mac_interface_t * cb
 
    tdma_instance_t * tdma = inst->tdma;
     
-    if (inst->fctrl_array[0] == FCNTL_IEEE_BLINK_CCP_64){
-        DIAGMSG("{\"utime\": %lu,\"msg\": \"tx_complete_cb\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
+    if (inst->fctrl_array[0] == FCNTL_IEEE_BLINK_CCP_64 && inst->ccp->config.role == CCP_ROLE_MASTER){
+        STATS_INC(inst->tdma->stat, tx_complete);
+        DIAGMSG("{\"utime\": %lu,\"msg\": \"tdma:tx_complete_cb\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
         if (inst->tdma != NULL && inst->tdma->status.initialized){
             tdma->os_epoch = os_cputime_get32();
 #ifdef TDMA_TASKS_ENABLE
@@ -307,9 +364,10 @@ tdma_assign_slot(struct _tdma_instance_t * inst, void (* callout )(struct os_eve
 void 
 tdma_release_slot(struct _tdma_instance_t * inst, uint16_t idx){
     assert(idx < inst->nslots);
-    assert(inst->slot[idx]);
-    free(inst->slot[idx]);
-    inst->slot[idx] =  NULL;
+    if (inst->slot[idx]) {
+        free(inst->slot[idx]);
+        inst->slot[idx] =  NULL;
+    }
 }
 
 /** 
@@ -326,8 +384,10 @@ tdma_superframe_event_cb(struct os_event * ev){
     assert(ev->ev_arg != NULL);
     
     DIAGMSG("{\"utime\": %lu,\"msg\": \"tdma_superframe_event_cb\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
-
     tdma_instance_t * tdma = (void *)ev->ev_arg;
+    
+    STATS_INC(tdma->stat, superframe_cnt);
+
     for (uint16_t i = 0; i < tdma->nslots; i++) {
         if (tdma->slot[i]){
             os_cputime_timer_stop(&tdma->slot[i]->timer);
@@ -337,12 +397,16 @@ tdma_superframe_event_cb(struct os_event * ev){
         if (tdma->slot[i]){
             hal_timer_start_at(&tdma->slot[i]->timer, tdma->os_epoch
                 + os_cputime_usecs_to_ticks(
-                    (uint32_t) (i * dw1000_dwt_usecs_to_usecs(tdma->period)/tdma->nslots) -
-                    (uint32_t)ceilf(dw1000_phy_SHR_duration(&tdma->parent->attrib)) -
-                    MYNEWT_VAL(OS_LATENCY))
+                    (uint32_t) (i * dw1000_dwt_usecs_to_usecs(tdma->period/tdma->nslots))
+                    - (uint32_t)ceilf(dw1000_phy_SHR_duration(&tdma->parent->attrib)) 
+                    - MYNEWT_VAL(OS_LATENCY))
             );
         }
     }
+#if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0 
+    struct os_task * t = os_sched_get_current_task();
+    os_sanity_task_checkin(t);
+#endif
 }
 
 
@@ -364,7 +428,9 @@ slot_timer_cb(void * arg){
     tdma_instance_t * tdma = slot->parent;
 
     DIAGMSG("{\"utime\": %lu,\"msg\": \"slot_timer_cb\"}\n",os_cputime_ticks_to_usecs(os_cputime_get32()));
-  
+
+    STATS_INC(tdma->stat, slot_timer_cnt);
+
 #ifdef TDMA_TASKS_ENABLE
     os_eventq_put(&tdma->eventq, &slot->event_cb.c_ev);
 #else
@@ -372,4 +438,21 @@ slot_timer_cb(void * arg){
 #endif
 }
 
+/**
+ * API to stop tdma operation. Releases each slot and stops all cputimer callbacks
+ *
+ * @param inst       Pointer to _tdma_instance_t.
+ *
+ * @return void
+ */
+void 
+tdma_stop(struct _tdma_instance_t * tdma)
+{
+    for (uint16_t i = 0; i < tdma->nslots; i++) {
+        if (tdma->slot[i]){
+            os_cputime_timer_stop(&tdma->slot[i]->timer);
+            tdma_release_slot(tdma, i);
+        }
+    }
+}
 

@@ -37,6 +37,7 @@
 extern "C" {
 #endif
 
+#include <stats/stats.h>
 #include <dw1000/dw1000_ftypes.h>
 #include <dw1000/dw1000_dev.h>
 #include <dw1000/dw1000_phy.h>
@@ -44,6 +45,13 @@ extern "C" {
 
 
 #define TDMA_TASKS_ENABLE
+
+STATS_SECT_START(tdma_stat_section)
+    STATS_SECT_ENTRY(slot_timer_cnt)
+    STATS_SECT_ENTRY(superframe_cnt)
+    STATS_SECT_ENTRY(rx_complete)
+    STATS_SECT_ENTRY(tx_complete)
+STATS_SECT_END
 
 //! Structure of TDMA
 typedef struct _tdma_status_t{
@@ -64,6 +72,7 @@ typedef struct _tdma_slot_t{
 //! Structure of tdma instance
 typedef struct _tdma_instance_t{
     struct _dw1000_dev_instance_t * parent;  //!< Pointer to _dw1000_dev_instance_t
+    STATS_SECT_DECL(tdma_stat_section) stat;  //!< Stats instance
     tdma_status_t status;                    //!< Status of tdma 
     dw1000_mac_interface_t cbs;              //!< MAC Layer Callbacks
     struct os_mutex mutex;                   //!< Structure of os_mutex  
@@ -78,6 +87,9 @@ typedef struct _tdma_instance_t{
     uint8_t task_prio;                       //!< Priority of tasks
     os_stack_t task_stack[DW1000_DEV_TASK_STACK_SZ]   //!< Stack size of each task
         __attribute__((aligned(OS_STACK_ALIGNMENT)));
+#if MYNEWT_VAL(TDMA_SANITY_INTERVAL) > 0
+    struct os_callout sanity_cb;             //!< Structure of sanity_cb
+#endif
 #endif
     struct _tdma_slot_t * slot[];           //!< Dynamically allocated slot
 }tdma_instance_t; 
@@ -86,6 +98,7 @@ struct _tdma_instance_t * tdma_init(struct _dw1000_dev_instance_t * inst, uint32
 void tdma_free(struct _tdma_instance_t * inst);
 void tdma_assign_slot(struct _tdma_instance_t * inst, void (* callout )(struct os_event *), uint16_t idx, void * arg);
 void tdma_release_slot(struct _tdma_instance_t * inst, uint16_t idx);
+void tdma_stop(struct _tdma_instance_t * tdma);
 
 #ifdef __cplusplus
 }

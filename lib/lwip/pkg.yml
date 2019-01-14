@@ -36,4 +36,4 @@ pkg.deps:
     - "@mynewt-dw1000-core/hw/drivers/dw1000"
 
 pkg.deps.DW1000_LWIP:
-- "@mynewt-dw1000-core/net/ip/lwip_base"
+    - "@mynewt-dw1000-core/net/ip/lwip_base"
